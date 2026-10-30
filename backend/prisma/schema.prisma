@@ -1,0 +1,292 @@
+// =====================================================================
+// Motion — Base de datos v1 (estudiantes + administradores)
+// Prisma 7 + Supabase (PostgreSQL)
+// Modelos en PascalCase singular, campos en camelCase.
+// En la base de datos quedan como tablas en plural y snake_case (@@map / @map).
+// =====================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Enums ----------
+enum UserRole {
+  student
+  admin
+
+  @@map("user_role")
+}
+
+enum UserStatus {
+  active
+  blocked
+  deleted
+
+  @@map("user_status")
+}
+
+enum AppTheme {
+  system
+  light
+  dark
+
+  @@map("app_theme")
+}
+
+enum CodePurpose {
+  email_verification
+  password_reset
+
+  @@map("code_purpose")
+}
+
+enum SessionType {
+  focus
+  break
+
+  @@map("session_type")
+}
+
+enum DevicePlatform {
+  ios
+  android
+
+  @@map("device_platform")
+}
+
+// =====================================================================
+// 1. CUENTAS Y SEGURIDAD (HU-02, 03, 04, 12, 24, 25, 26, 27)
+// =====================================================================
+model User {
+  id              String     @id @default(uuid()) @db.Uuid
+  name            String     @db.VarChar(80)
+  email           String     @unique @db.VarChar(255) // guardar siempre en minúsculas
+  passwordHash    String     @map("password_hash") // bcrypt/argon2, nunca la contraseña
+  role            UserRole   @default(student)
+  status          UserStatus @default(active)
+  avatarUrl       String?    @map("avatar_url")
+  theme           AppTheme   @default(system)
+  timezone        String     @default("America/Bogota") @db.VarChar(50)
+  emailVerifiedAt DateTime?  @map("email_verified_at") @db.Timestamptz
+  lastLoginAt     DateTime?  @map("last_login_at") @db.Timestamptz
+  blockedReason   String?    @map("blocked_reason")
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt       DateTime?  @map("deleted_at") @db.Timestamptz // borrado lógico (HU-14)
+
+  verificationCodes       VerificationCode[]
+  authSessions            AuthSession[]
+  subjects                Subject[]
+  tasks                   Task[]
+  focusSessions           FocusSession[]
+  dailyProgress           DailyProgress[]
+  reminders               Reminder[]
+  pushTokens              PushToken[]
+  notificationPreferences NotificationPreferences?
+  quotesCreated           MotivationalQuote[]
+  activity                ActivityLog[]            @relation("ActivityActor")
+  activityReceived        ActivityLog[]            @relation("ActivityTarget")
+
+  @@map("users")
+}
+
+// Códigos de 6 dígitos enviados por correo (verificar cuenta / cambiar contraseña)
+model VerificationCode {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  purpose   CodePurpose
+  codeHash  String      @map("code_hash") // se guarda el hash, no el código
+  attempts  Int         @default(0) @db.SmallInt
+  expiresAt DateTime    @map("expires_at") @db.Timestamptz
+  usedAt    DateTime?   @map("used_at") @db.Timestamptz
+  createdAt DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@map("verification_codes")
+}
+
+// Sesiones abiertas (refresh tokens). Cerrar sesión = revokedAt
+model AuthSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  deviceName       String?   @map("device_name") @db.VarChar(100)
+  expiresAt        DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt        DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("auth_sessions")
+}
+
+// =====================================================================
+// 2. ORGANIZACIÓN (HU-05 a 09, Materias)
+// =====================================================================
+model Subject {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  name       String    @db.VarChar(60)
+  color      String    @default("#7C5CFF") @db.Char(7)
+  icon       String?   @db.VarChar(40)
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks Task[]
+
+  @@unique([userId, name])
+  @@map("subjects")
+}
+
+model Task {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  subjectId   String?   @map("subject_id") @db.Uuid
+  title       String    @db.VarChar(120)
+  notes       String?
+  dueDate     DateTime? @map("due_date") @db.Date // día (calendario semanal)
+  dueTime     DateTime? @map("due_time") @db.Time // hora opcional
+  isImportant Boolean   @default(false) @map("is_important")
+  isDone      Boolean   @default(false) @map("is_done")
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject       Subject?       @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  focusSessions FocusSession[]
+  reminders     Reminder[]
+
+  @@index([userId, dueDate])
+  @@index([userId, isDone])
+  @@map("tasks")
+}
+
+// =====================================================================
+// 3. ESTUDIO Y LA M DEL DÍA (HU-17)
+// =====================================================================
+model FocusSession {
+  id             String      @id @default(uuid()) @db.Uuid
+  userId         String      @map("user_id") @db.Uuid
+  taskId         String?     @map("task_id") @db.Uuid
+  type           SessionType @default(focus)
+  plannedMinutes Int         @map("planned_minutes") @db.SmallInt
+  startedAt      DateTime    @default(now()) @map("started_at") @db.Timestamptz
+  endedAt        DateTime?   @map("ended_at") @db.Timestamptz
+  completed      Boolean     @default(false) // true si terminó el tiempo completo
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([userId, startedAt])
+  @@map("focus_sessions")
+}
+
+// Un registro por usuario y día: cuántos bloques de la M lleva (0 a 7)
+model DailyProgress {
+  userId       String    @map("user_id") @db.Uuid
+  day          DateTime  @db.Date
+  blocksEarned Int       @default(0) @map("blocks_earned") @db.SmallInt
+  blocksGoal   Int       @default(7) @map("blocks_goal") @db.SmallInt
+  completedAt  DateTime? @map("completed_at") @db.Timestamptz // cuando armó la M completa
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, day])
+  @@map("daily_progress")
+}
+
+// =====================================================================
+// 4. RECORDATORIOS Y NOTIFICACIONES (HU-18, 21, 31)
+// =====================================================================
+model Reminder {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  taskId    String    @map("task_id") @db.Uuid
+  remindAt  DateTime  @map("remind_at") @db.Timestamptz
+  sentAt    DateTime? @map("sent_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([remindAt, sentAt])
+  @@map("reminders")
+}
+
+// Celulares del usuario para notificaciones push (Expo)
+model PushToken {
+  id         String         @id @default(uuid()) @db.Uuid
+  userId     String         @map("user_id") @db.Uuid
+  token      String         @unique // ExponentPushToken[...]
+  platform   DevicePlatform
+  lastUsedAt DateTime       @default(now()) @map("last_used_at") @db.Timestamptz
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_tokens")
+}
+
+model NotificationPreferences {
+  userId              String   @id @map("user_id") @db.Uuid
+  taskReminders       Boolean  @default(true) @map("task_reminders")
+  defaultReminderMins Int      @default(60) @map("default_reminder_mins") @db.SmallInt
+  dailySummary        Boolean  @default(true) @map("daily_summary")
+  dailySummaryTime    String   @default("07:00") @map("daily_summary_time") @db.VarChar(5) // "HH:mm"
+  focusAlerts         Boolean  @default(true) @map("focus_alerts")
+  motivationalQuotes  Boolean  @default(true) @map("motivational_quotes")
+  quietHoursStart     String?  @map("quiet_hours_start") @db.VarChar(5) // no molestar
+  quietHoursEnd       String?  @map("quiet_hours_end") @db.VarChar(5)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+// =====================================================================
+// 5. CONTENIDO (HU-22, 30)
+// =====================================================================
+model MotivationalQuote {
+  id        String   @id @default(uuid()) @db.Uuid
+  text      String   @db.VarChar(280)
+  author    String?  @db.VarChar(80)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdBy String?  @map("created_by") @db.Uuid // admin que la creó
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  creator User? @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@map("motivational_quotes")
+}
+
+// =====================================================================
+// 6. ADMINISTRACIÓN (HU-28, 29)
+// =====================================================================
+// Registro de actividad: inicios de sesión, tareas creadas, acciones de admin...
+model ActivityLog {
+  id           BigInt   @id @default(autoincrement())
+  userId       String?  @map("user_id") @db.Uuid // quién lo hizo
+  targetUserId String?  @map("target_user_id") @db.Uuid // a quién (acciones de admin)
+  action       String   @db.VarChar(50) // 'login', 'task_created', 'user_blocked', ...
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user       User? @relation("ActivityActor", fields: [userId], references: [id], onDelete: SetNull)
+  targetUser User? @relation("ActivityTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@map("activity_logs")
+}
